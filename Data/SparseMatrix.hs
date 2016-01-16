@@ -3,7 +3,7 @@
 module Closure where
 
 import Algebra.Classes
-import Prelude (Bool(..),otherwise,Int,print)
+import Prelude (Bool(..),otherwise,Int,print,Ord(..),Functor(..))
 
 class (Ring a, ZeroTest a) => RingZ a where
 
@@ -28,12 +28,26 @@ data Mat :: Shape -> Shape -> * -> * where
   Row :: Mat x1 'Leaf a -> Mat x2 'Leaf a -> Mat ('Bin x1 x2) 'Leaf a
   Col :: Mat 'Leaf y1 a -> Mat 'Leaf y2 a -> Mat 'Leaf ('Bin y1 y2) a
 
-data Vec :: Shape -> *  -> * where
-  ZeroV :: Vec x a
-  BinV :: Vec x a -> Vec y a -> Vec ('Bin x y) a
-  OneV :: a -> Vec 'Leaf a
+type Row x a = Mat x 'Leaf a
+type Col x a = Mat 'Leaf x a
+
+transpose :: Mat x y a -> Mat y x a
+transpose Zero = Zero
+transpose (One a) = One a
+transpose (Row a b) = Col (transpose a) (transpose b)
+transpose (Col a b) = Row (transpose a) (transpose b)
+transpose (Quad a b c d) = Quad (transpose a) (transpose  c)
+                                (transpose b) (transpose d)
 
 infixl 7 ∙
+
+-- | Attn! this instance supposes that the map preserves zeros.
+instance Functor (Mat x y) where
+  fmap f Zero = Zero
+  fmap f (One a) = One (f a)
+  fmap f (Row a b) = Row (fmap f a) (fmap f b)
+  fmap f (Col a b) = Col (fmap f a) (fmap f b)
+  fmap f (Quad a b c d) = Quad (fmap f a) (fmap f b) (fmap f c) (fmap f d)
 
 -- | Product of sparse matrices
 (∙) :: RingZ a => Mat x y a -> Mat z x a -> Mat z y a
@@ -102,16 +116,31 @@ bin' :: Shape' s -> Shape' s' -> Shape' ('Bin s s')
 bin' s s' = Bin' (sz' s + sz' s') s s'
 
 foldIx :: Int -> Int -> (Int -> Int -> a -> b) -> b -> (b -> b -> b) -> (b -> b -> b) ->
-          Max x y a -> b
-foldIx u v h Zero
+          Shape' x -> Shape' y -> Mat x y a -> b
+foldIx x y u z (<|>) (<->) _ _ Zero = z
+foldIx x y u z (<|>) (<->) w h (One a) = u x y a
+foldIx x y u z (<|>) (<->) (Bin' _ wa wb) Leaf' (Row a b) =
+       foldIx x y u z (<|>) (<->) wa Leaf' a
+   <|> foldIx (x + sz' wa) y u z (<|>) (<->) wb Leaf' b
+foldIx x y u z (<|>) (<->) Leaf' (Bin' _ ha hb) (Col a b) =
+       foldIx x y u z (<|>) (<->) Leaf' ha a
+   <-> foldIx x (y + sz' ha) u z (<|>) (<->) Leaf' hb b
+foldIx x y u z (<|>) (<->) (Bin' _ wa wb) (Bin' _ ha hb) (Quad a b c d) =
+       (foldIx x y u z (<|>) (<->) wa ha a <|>
+        foldIx (x + sz' wa) y u z (<|>) (<->) wb ha b)
+   <-> (foldIx x (y + sz' ha) u z (<|>) (<->) wa hb c <|>
+        foldIx (x + sz' wa) (y + sz' ha) u z (<|>) (<->) wb hb d)
 
--- | Lookup in a vector
-lk :: AbelianGroup a => Int -> Shape' x -> Vec x a -> a
-lk n _ Z = zero
-lk 0 Leaf' (O x) = x
-lk i (Bin' _ s s') (x :! x')
-  | i < sz' s  = lk i s x
-  | otherwise = lk (i - sz' s) s' x'
+lookupRow :: Int -> Shape' y -> Mat x y a -> Row x a
+lookupRow _ _ Zero = Zero
+lookupRow y Leaf' m = m
+lookupRow i (Bin' _ wa wb) (Quad a b c d)
+  | i  < sz' wa = Row (lookupRow i wa a) (lookupRow i wa b)
+  | otherwise = Row (lookupRow (i-sz' wa) wb c) (lookupRow (i-sz' wa) wb d)
+
+lookupCol :: Int -> Shape' x -> Mat x y a -> Col y a
+lookupCol i w m = transpose (lookupRow i w (transpose m))
+
 
 mkShape :: Int -> SomeShape
 mkShape 1 = S (bin' Leaf' Leaf')
