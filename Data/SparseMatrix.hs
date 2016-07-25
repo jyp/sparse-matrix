@@ -1,11 +1,15 @@
-{-# LANGUAGE DataKinds, KindSignatures, GADTs #-}
+{-# LANGUAGE DataKinds, KindSignatures, GADTs, ConstraintKinds, FlexibleInstances #-}
 
 module Closure where
 
 import Algebra.Classes
 import Prelude (Bool(..),otherwise,Int,print,Ord(..),Functor(..))
 
-class (Ring a, ZeroTest a) => RingZ a where
+type RingZ a = (Ring a, ZeroTest a)
+
+class Ring a => Closed a where
+  -- closure a = one + a + a*a + a*a*a + ...
+  closure :: a -> a
 
 class ZeroTest a where
   isZero :: a -> Bool
@@ -24,7 +28,8 @@ data Mat :: Shape -> Shape -> * -> * where
           !(Mat x1 y2 a) -> !(Mat x2 y2 a) ->
           Mat ('Bin x1 x2) ('Bin y1 y2) a
   Zero :: Mat x y a
-  One :: !a -> Mat 'Leaf 'Leaf a
+  Single :: !a -> Mat 'Leaf 'Leaf a
+
   Row :: Mat x1 'Leaf a -> Mat x2 'Leaf a -> Mat ('Bin x1 x2) 'Leaf a
   Col :: Mat 'Leaf y1 a -> Mat 'Leaf y2 a -> Mat 'Leaf ('Bin y1 y2) a
 
@@ -33,7 +38,8 @@ type Col x a = Mat 'Leaf x a
 
 transpose :: Mat x y a -> Mat y x a
 transpose Zero = Zero
-transpose (One a) = One a
+-- transpose One = One
+transpose (Single a) = Single a
 transpose (Row a b) = Col (transpose a) (transpose b)
 transpose (Col a b) = Row (transpose a) (transpose b)
 transpose (Quad a b c d) = Quad (transpose a) (transpose  c)
@@ -44,7 +50,7 @@ infixl 7 ∙
 -- | Attn! this instance supposes that the map preserves zeros.
 instance Functor (Mat x y) where
   fmap f Zero = Zero
-  fmap f (One a) = One (f a)
+  fmap f (Single a) = Single (f a)
   fmap f (Row a b) = Row (fmap f a) (fmap f b)
   fmap f (Col a b) = Col (fmap f a) (fmap f b)
   fmap f (Quad a b c d) = Quad (fmap f a) (fmap f b) (fmap f c) (fmap f d)
@@ -53,9 +59,9 @@ instance Functor (Mat x y) where
 (∙) :: RingZ a => Mat x y a -> Mat z x a -> Mat z y a
 Zero ∙ _ = Zero
 _ ∙ Zero = Zero
-One x ∙ One x' = Closure.one (x * x')
-One x ∙ Row a b = row (One x ∙ a) (One x ∙ b)
-Col a b ∙ One x = col (a ∙ One x) (b ∙ One x)
+Single x ∙ Single x' = oneM (x * x')
+Single x ∙ Row a b = row (Single x ∙ a) (Single x ∙ b)
+Col a b ∙ Single x = col (a ∙ Single x) (b ∙ Single x)
 Row a b ∙ Col a' b' = a ∙ a' + b ∙ b'
 Col a b ∙ Row a' b' = quad (a ∙ a') (a ∙ b') (b ∙ a') (b ∙ b')
 Row a b ∙ Quad a' b' c' d' = row (a ∙ a' + b ∙ c') (a ∙ b' + b ∙ d')
@@ -69,9 +75,12 @@ instance (Additive a, ZeroTest a) => Additive (Mat x y a) where
   Zero + x = x
   x + Zero = x
   Quad a b c d + Quad a' b' c' d' = quad (a + a') (b + b') (c + c') (d + d')
-  One x + One x' = Closure.one (x + x')
+  Single x + Single x' = oneM (x + x')
   Row x y + Row x' y' = row (x + x') (y + y')
   Col x y + Col x' y' = col (x + x') (y + y')
+
+instance (ZeroTest a, Group a) => Group (Mat x y a) where
+  negate = fmap negate
 
 
 instance (ZeroTest a, AbelianAdditive a) => AbelianAdditive (Mat x y a) where
@@ -92,21 +101,30 @@ quad :: Mat x1 y1 a
 quad Zero Zero Zero Zero = Zero
 quad a b c d = Quad a b c d
 
-one :: ZeroTest a => a -> Mat 'Leaf 'Leaf a
-one x | isZero x = Zero
-      | otherwise = One x
+oneM :: ZeroTest a => a -> Mat 'Leaf 'Leaf a
+oneM x | isZero x = Zero
+      | otherwise = Single x
 
-closure :: RingZ a => Mat x x a -> Mat x x a
-closure Zero = Zero
-closure (One a) = One a
-closure (Quad a b c d) = Quad (ac + b ∙ deltac ∙ c') (b' ∙ deltac)
-                              (deltac ∙ c') deltac
-  where
-    b' = ac ∙ b
-    c' = c ∙ ac
-    delta = d + c ∙ ac ∙ b
-    deltac = closure delta
-    ac = closure a
+instance RingZ a => Multiplicative (Mat x x a) where
+  (*) = (∙)
+  -- one = _
+
+instance RingZ a => Ring (Mat x x a) where
+
+
+instance (Closed a,ZeroTest a) => Closed (Mat x x a) where
+  -- closure :: RingZ a => Mat x x a -> Mat x x a
+  closure Zero = Zero
+  -- closure One = One
+  closure (Single a) = Single (closure a)
+  closure (Quad a b c d) = Quad (ac + b ∙ deltac ∙ c') (b' ∙ deltac)
+                                (deltac ∙ c') deltac
+    where
+      b' = ac ∙ b
+      c' = c ∙ ac
+      delta = d + c ∙ ac ∙ b
+      deltac = closure delta
+      ac = closure a
 
 sz' :: Shape' s -> Int
 sz' Leaf' = 1
@@ -118,7 +136,7 @@ bin' s s' = Bin' (sz' s + sz' s') s s'
 foldIx :: Int -> Int -> (Int -> Int -> a -> b) -> b -> (b -> b -> b) -> (b -> b -> b) ->
           Shape' x -> Shape' y -> Mat x y a -> b
 foldIx x y u z (<|>) (<->) _ _ Zero = z
-foldIx x y u z (<|>) (<->) w h (One a) = u x y a
+foldIx x y u z (<|>) (<->) w h (Single a) = u x y a
 foldIx x y u z (<|>) (<->) (Bin' _ wa wb) Leaf' (Row a b) =
        foldIx x y u z (<|>) (<->) wa Leaf' a
    <|> foldIx (x + sz' wa) y u z (<|>) (<->) wb Leaf' b
